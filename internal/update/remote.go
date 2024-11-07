@@ -62,6 +62,7 @@ func (w *RemoteFileValidateWorker) run(job *RemoteFileValidateJob) error {
 		if errors.Is(err, sql.ErrNoRows) {
 			w.output <- &FileCategorisationResult{
 				Category: FileResultDownload,
+				Reason:   FileCategorisationReasonNotFoundDatabase,
 				File:     job.file,
 			}
 			return nil
@@ -74,6 +75,7 @@ func (w *RemoteFileValidateWorker) run(job *RemoteFileValidateJob) error {
 	if err != nil {
 		w.output <- &FileCategorisationResult{
 			Category: FileResultDownload,
+			Reason:   FileCategorisationReasonNotFoundDisk,
 			File:     job.file,
 		}
 		return nil
@@ -82,6 +84,7 @@ func (w *RemoteFileValidateWorker) run(job *RemoteFileValidateJob) error {
 	if local.Size != stat.Size() || stat.ModTime().UTC().Equal(local.Timestamp) == false {
 		w.output <- &FileCategorisationResult{
 			Category: FileResultDownload,
+			Reason:   FileCategorisationReasonDatabaseMismatch,
 			File:     job.file,
 		}
 		return nil

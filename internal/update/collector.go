@@ -6,10 +6,20 @@ import (
 	"sync"
 )
 
+type FileCategorisationReason int
+
+const (
+	FileCategorisationReasonNone = iota
+	FileCategorisationReasonNotFoundDatabase
+	FileCategorisationReasonNotFoundDisk
+	FileCategorisationReasonDatabaseMismatch
+)
+
 type FileResultCategory int
 
 type FileCategorisationResult struct {
 	Category FileResultCategory
+	Reason   FileCategorisationReason
 	File     *mevmanifest.File
 }
 
@@ -60,13 +70,13 @@ func (c *PlanningResultCollector) Start() {
 		c.mu.Lock()
 		switch result.Category {
 		case FileResultIgnore:
-			fmt.Println(fmt.Sprintf("[Result Collector] Ignore %s", result.File.Path))
+			fmt.Println(fmt.Sprintf("[Result Collector] Ignore %d %s", result.Reason, result.File.Path))
 			c.FilesIgnored = append(c.FilesIgnored, result.File)
 		case FileResultPatch:
-			fmt.Println(fmt.Sprintf("[Result Collector] Patch %s", result.File.Path))
+			fmt.Println(fmt.Sprintf("[Result Collector] Patch %d %s", result.Reason, result.File.Path))
 			c.FilesRequirePatch = append(c.FilesRequirePatch, result.File)
 		case FileResultDownload:
-			fmt.Println(fmt.Sprintf("[Result Collector] Download %s", result.File.Path))
+			fmt.Println(fmt.Sprintf("[Result Collector] Download %d %s", result.Reason, result.File.Path))
 			c.FilesRequireDownload = append(c.FilesRequireDownload, result.File)
 		}
 		c.mu.Unlock()
