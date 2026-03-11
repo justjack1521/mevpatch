@@ -4,7 +4,7 @@ go 1.22.3
 
 require (
 	gioui.org v0.7.1
-	github.com/justjack1521/mevmanifest v0.0.0-20241107124547-c3d14977ebb2
+	github.com/justjack1521/mevmanifest v0.0.0-20250405114456-8870413e2837
 	modernc.org/sqlite v1.33.1
 )
 

@@ -2,13 +2,14 @@ package database
 
 import (
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 )
 
-func NewConnection() (*sql.DB, error) {
+func NewConnection(app string) (*sql.DB, error) {
 
-	path, err := databasePath()
+	path, err := databasePath(app)
 	if err != nil {
 		return nil, err
 	}
@@ -17,21 +18,30 @@ func NewConnection() (*sql.DB, error) {
 		return nil, err
 	}
 
-	return sql.Open("sqlite", path)
+	dbc, err := sql.Open("sqlite", path)
+	if err != nil {
+		return nil, err
+	}
+	_, err = dbc.Exec("PRAGMA busy_timeout = 5000;")
+	if err != nil {
+		return nil, err
+	}
+	_, err = dbc.Exec("PRAGMA journal_mode = WAL;")
+	if err != nil {
+		return nil, err
+	}
+	return dbc, nil
 
 }
 
-func databasePath() (string, error) {
-	own, err := os.Executable()
-	if err != nil {
-		return "", err
-	}
-	var path = filepath.Join(filepath.Dir(own), "..", "StreamingAssets", "patching.sqlite")
+func databasePath(app string) (string, error) {
+	var low = filepath.Join(os.Getenv("USERPROFILE"), "AppData", "LocalLow")
+	var path = filepath.Join(low, "BlankProjectDev", "Blank Project Launcher", fmt.Sprintf("%s.sqlite", "patching"))
 	return filepath.Clean(path), nil
 }
 
-func ExistsAtPath() bool {
-	path, err := databasePath()
+func ExistsAtPath(app string) bool {
+	path, err := databasePath(app)
 	if err != nil {
 		return false
 	}

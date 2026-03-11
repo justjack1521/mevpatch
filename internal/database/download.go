@@ -1,6 +1,7 @@
 package database
 
 import (
+	"fmt"
 	"github.com/justjack1521/mevpatch/internal/patch"
 	"io"
 	"net/http"
@@ -11,12 +12,13 @@ import (
 
 func DownloadDatabase(host string, app string, version patch.Version) error {
 
-	uri, err := url.JoinPath(host, "downloads", app, "database", version.String(), "patching.sqlite")
+	uri, err := url.JoinPath(host, "downloads", "launcher", "database", fmt.Sprintf("%s.sqlite", "patching"))
+	fmt.Println(uri)
 	if err != nil {
 		return err
 	}
 
-	path, err := databasePath()
+	path, err := databasePath(app)
 	if err != nil {
 		return err
 	}

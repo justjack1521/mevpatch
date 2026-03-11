@@ -10,6 +10,14 @@ import (
 	"net/url"
 )
 
+func URI(host string, app string, version patch.Version) (string, error) {
+	uri, err := url.JoinPath(host, "downloads", app, "manifest", fmt.Sprintf("%s_manifest.json", version.String()))
+	if err != nil {
+		return "", err
+	}
+	return uri, nil
+}
+
 func DownloadManifest(host string, app string, version patch.Version) (*mevmanifest.Manifest, error) {
 
 	uri, err := url.JoinPath(host, "downloads", app, "manifest", fmt.Sprintf("%s_manifest.json", version.String()))
@@ -17,13 +25,15 @@ func DownloadManifest(host string, app string, version patch.Version) (*mevmanif
 		return nil, err
 	}
 
-	fmt.Println(uri)
-
 	resp, err := http.Get(uri)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected status code %d", resp.StatusCode)
+	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {

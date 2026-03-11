@@ -13,6 +13,7 @@ const (
 	FileCategorisationReasonNotFoundDatabase
 	FileCategorisationReasonNotFoundDisk
 	FileCategorisationReasonDatabaseMismatch
+	FileCategorisationReasonForceFull
 )
 
 type FileResultCategory int
@@ -22,6 +23,16 @@ type FileCategorisationResult struct {
 	Reason   FileCategorisationReason
 	File     *mevmanifest.File
 }
+
+var (
+	FileCategorisationReasonPrintMap = map[FileCategorisationReason]string{
+		FileCategorisationReasonNone:             "None",
+		FileCategorisationReasonNotFoundDatabase: "Not found in database",
+		FileCategorisationReasonNotFoundDisk:     "Not found on disk",
+		FileCategorisationReasonDatabaseMismatch: "Database mismatch",
+		FileCategorisationReasonForceFull:        "Force",
+	}
+)
 
 const (
 	FileResultIgnore FileResultCategory = iota
@@ -70,15 +81,16 @@ func (c *PlanningResultCollector) Start() {
 		c.mu.Lock()
 		switch result.Category {
 		case FileResultIgnore:
-			fmt.Println(fmt.Sprintf("[Result Collector] Ignore %d %s", result.Reason, result.File.Path))
+			fmt.Println(fmt.Sprintf("[Result Collector] Ignore %s %s", FileCategorisationReasonPrintMap[result.Reason], result.File.Path))
 			c.FilesIgnored = append(c.FilesIgnored, result.File)
 		case FileResultPatch:
-			fmt.Println(fmt.Sprintf("[Result Collector] Patch %d %s", result.Reason, result.File.Path))
+			fmt.Println(fmt.Sprintf("[Result Collector] Patch %s %s", FileCategorisationReasonPrintMap[result.Reason], result.File.Path))
 			c.FilesRequirePatch = append(c.FilesRequirePatch, result.File)
 		case FileResultDownload:
-			fmt.Println(fmt.Sprintf("[Result Collector] Download %d %s", result.Reason, result.File.Path))
+			fmt.Println(fmt.Sprintf("[Result Collector] Download %s %s", FileCategorisationReasonPrintMap[result.Reason], result.File.Path))
 			c.FilesRequireDownload = append(c.FilesRequireDownload, result.File)
 		}
 		c.mu.Unlock()
 	}
+	close(c.done)
 }

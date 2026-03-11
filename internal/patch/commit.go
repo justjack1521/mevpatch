@@ -1,27 +1,32 @@
-package update
+package patch
 
 import (
 	"context"
 	"fmt"
-	"github.com/justjack1521/mevpatch/internal/database"
+	"github.com/justjack1521/mevpatch/internal/file"
 	"sync"
 	"time"
 )
 
 type FileMetadataCommitJob struct {
-	Path string
-	Size int64
+	Path     string
+	Size     int64
+	Checksum string
+}
+
+func NewFileMetadataCommitJob(path string, size int64, checksum string) *FileMetadataCommitJob {
+	return &FileMetadataCommitJob{Path: path, Size: size, Checksum: checksum}
 }
 
 type FileMetadataCommitWorker struct {
 	app        string
-	repository *database.PatchingRepository
+	repository file.Repository
 	group      *sync.WaitGroup
 	commits    <-chan *FileMetadataCommitJob
 	errors     chan<- error
 }
 
-func NewFileMetadataCommitWorker(app string, repo *database.PatchingRepository, group *sync.WaitGroup, input <-chan *FileMetadataCommitJob, errors chan<- error) *FileMetadataCommitWorker {
+func NewFileMetadataCommitWorker(app string, repo file.Repository, group *sync.WaitGroup, input <-chan *FileMetadataCommitJob, errors chan<- error) *FileMetadataCommitWorker {
 	return &FileMetadataCommitWorker{app: app, repository: repo, group: group, commits: input, errors: errors}
 }
 
@@ -39,7 +44,7 @@ func (w *FileMetadataCommitWorker) Run() {
 }
 
 func (w *FileMetadataCommitWorker) run(job *FileMetadataCommitJob) error {
-	if err := w.repository.CreateApplicationFile(context.Background(), w.app, job.Path, job.Size, "", time.Now().UTC()); err != nil {
+	if err := w.repository.CreateApplicationFile(context.Background(), w.app, job.Path, job.Size, job.Checksum, time.Now().UTC()); err != nil {
 		fmt.Println(fmt.Sprintf("[File Commit] Failed: %s", job.Path))
 		return err
 	}
@@ -47,27 +52,25 @@ func (w *FileMetadataCommitWorker) run(job *FileMetadataCommitJob) error {
 }
 
 type FileMetadataCommitWorkerGroup struct {
-	app     string
-	repo    *database.PatchingRepository
+	repo    file.Repository
 	group   *sync.WaitGroup
-	channel chan *FileMetadataCommitJob
+	Channel chan *FileMetadataCommitJob
 	count   int
 }
 
-func NewFileMetadataCommitWorkerGroup(app string, repo *database.PatchingRepository, count int) *FileMetadataCommitWorkerGroup {
+func NewFileMetadataCommitWorkerGroup(repo file.Repository, count int) *FileMetadataCommitWorkerGroup {
 	return &FileMetadataCommitWorkerGroup{
-		app:     app,
 		repo:    repo,
 		group:   &sync.WaitGroup{},
-		channel: make(chan *FileMetadataCommitJob, count),
+		Channel: make(chan *FileMetadataCommitJob, count),
 		count:   count,
 	}
 }
 
-func (g *FileMetadataCommitWorkerGroup) Start(errors chan<- error) {
+func (g *FileMetadataCommitWorkerGroup) Start(app string, errors chan<- error) {
 	g.group.Add(g.count)
 	for i := 0; i < g.count; i++ {
-		var worker = NewFileMetadataCommitWorker(g.app, g.repo, g.group, g.channel, errors)
+		var worker = NewFileMetadataCommitWorker(app, g.repo, g.group, g.Channel, errors)
 		go worker.Run()
 	}
 }

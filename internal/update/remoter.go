@@ -2,26 +2,26 @@ package update
 
 import (
 	"fmt"
-	"github.com/justjack1521/mevpatch/internal/database"
+	"github.com/justjack1521/mevpatch/internal/file"
 )
 
 type RemoteFileValidator struct {
 	application string
-	validators  *RemoteFileValidateWorkerGroup
+	validators  *FileCacheValidateWorkerGroup
 	collectors  chan *FileCategorisationResult
 	errors      chan error
 }
 
-func NewRemoteFileValidator(app string, repo *database.PatchingRepository, count int) *RemoteFileValidator {
+func NewRemoteFileValidator(app string, repo file.Repository, count int) *RemoteFileValidator {
 	var updater = &RemoteFileValidator{
 		application: app,
-		validators:  NewRemoteFileValidateWorkerGroup(app, repo, count),
+		validators:  NewFileCacheValidateWorkerGroup(app, count),
 		errors:      make(chan error, 10),
 	}
 	return updater
 }
 
-func (u *RemoteFileValidator) Start(validates []*RemoteFileValidateJob) {
+func (u *RemoteFileValidator) Start(validates []*FileCacheValidateJob) {
 
 	go func() {
 		for err := range u.errors {
@@ -34,7 +34,7 @@ func (u *RemoteFileValidator) Start(validates []*RemoteFileValidateJob) {
 	//u.committers.Start(u.errors)
 	//
 	//for _, job := range validates {
-	//	u.validators.channel <- &RemoteFileValidateJob{
+	//	u.validators.channel <- &FileCacheValidateJob{
 	//		Path:         job.Path,
 	//		Size:         job.Size,
 	//		Checksum:     job.Checksum,

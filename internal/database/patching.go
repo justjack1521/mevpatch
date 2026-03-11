@@ -3,6 +3,8 @@ package database
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
 	mevmanifest "github.com/justjack1521/mevmanifest/pkg/gensql"
 	"github.com/justjack1521/mevpatch/internal/file"
 	"github.com/justjack1521/mevpatch/internal/patch"
@@ -11,19 +13,37 @@ import (
 )
 
 type PatchingRepository struct {
-	queries *mevmanifest.Queries
-	wmx     sync.Mutex
+	database *sql.DB
+	queries  *mevmanifest.Queries
+	wmx      sync.Mutex
 }
 
 func NewPatchingRepository(db *sql.DB) *PatchingRepository {
 	return &PatchingRepository{
-		queries: mevmanifest.New(db),
+		database: db,
+		queries:  mevmanifest.New(db),
 	}
+}
+
+func (r *PatchingRepository) Close() error {
+	_, err := r.database.Exec("PRAGMA journal_mode = DELETE;")
+	if err != nil {
+		return fmt.Errorf("failed to reset journal mode to DELETE: %w", err)
+	}
+
+	if err := r.database.Close(); err != nil {
+		return fmt.Errorf("failed to close database: %w", err)
+	}
+
+	return nil
 }
 
 func (r *PatchingRepository) GetApplicationVersion(ctx context.Context, name string) (patch.Version, error) {
 	result, err := r.queries.GetApplicationVersion(ctx, name)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return patch.Version{}, nil
+		}
 		return patch.Version{}, err
 	}
 	return patch.Version{
@@ -33,12 +53,25 @@ func (r *PatchingRepository) GetApplicationVersion(ctx context.Context, name str
 	}, nil
 }
 
+func (r *PatchingRepository) UpdateApplicationVersion(ctx context.Context, name string, version patch.Version) error {
+	var args = mevmanifest.CreateApplicationVersionParams{
+		Major: int64(version.Major),
+		Minor: int64(version.Minor),
+		Patch: int64(version.Patch),
+		Name:  name,
+	}
+	return r.queries.CreateApplicationVersion(ctx, args)
+}
+
 func (r *PatchingRepository) GetApplicationFile(ctx context.Context, application string, path string) (file.LocalFile, error) {
 	result, err := r.queries.GetApplicationFile(ctx, mevmanifest.GetApplicationFileParams{
 		Path:        path,
 		Application: application,
 	})
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return file.LocalFile{}, nil
+		}
 		return file.LocalFile{}, err
 	}
 	return file.LocalFile{
