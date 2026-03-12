@@ -3,45 +3,47 @@ package patch
 import (
 	"fmt"
 	mevmanifest "github.com/justjack1521/mevmanifest/pkg/genproto"
-	"github.com/justjack1521/mevpatch/internal/file"
-	uuid "github.com/satori/go.uuid"
 )
 
+const remoteHost = "https://mevius-patch-us.sfo3.digitaloceanspaces.com"
+
+// RemoteSourceFileDownloader orchestrates parallel source file downloads
+// for a list of manifest files that need a full download.
 type RemoteSourceFileDownloader struct {
-	Application string
+	application string
 	sourcers    *RemoteFileSourceWorkerGroup
-	mergers     *RemoteFileMergeWorkerGroup
 	commiters   *FileMetadataCommitWorkerGroup
 	errors      chan error
 }
 
-func NewRemoteSourceFileDownloader(app string, files file.Repository) *RemoteSourceFileDownloader {
+func NewRemoteSourceFileDownloader(app string, state *InstallState) *RemoteSourceFileDownloader {
 	return &RemoteSourceFileDownloader{
-		Application: app,
-		sourcers:    NewRemoteFileSourceWorkerGroup(10),
-		commiters:   NewFileMetadataCommitWorkerGroup(files, 10),
-		errors:      make(chan error, 10),
+		application: app,
+		sourcers:    NewRemoteFileSourceWorkerGroup(8),
+		commiters:   NewFileMetadataCommitWorkerGroup(state, 8),
+		errors:      make(chan error, 20),
 	}
 }
 
+// Start downloads all files concurrently and blocks until complete.
+// progress receives bytes-written increments for each chunk downloaded.
 func (u *RemoteSourceFileDownloader) Start(files []*mevmanifest.File, progress chan<- float32) {
-
-	defer close(u.errors)
 	defer close(progress)
 
 	go func() {
 		for err := range u.errors {
-			fmt.Printf("Error: %v\n", err)
+			fmt.Printf("[Source Downloader] Error: %v\n", err)
 		}
 	}()
 
-	u.sourcers.Start(u.Application, "https://mevius-patch-us.sfo3.digitaloceanspaces.com", u.commiters.Channel, progress, u.errors)
-	u.commiters.Start(u.Application, u.errors)
+	u.sourcers.Start(u.application, remoteHost, u.commiters.Channel, progress, u.errors)
+	u.commiters.Start(u.application, u.errors)
 
-	for _, job := range files {
+	for _, f := range files {
 		u.sourcers.channel <- &RemoteFileSourceJob{
-			JobID: uuid.FromStringOrNil(job.Id),
-			Path:  job.Path,
+			Path:     f.Path,
+			Checksum: f.Checksum,
+			Size:     f.Size,
 		}
 	}
 
@@ -51,4 +53,5 @@ func (u *RemoteSourceFileDownloader) Start(files []*mevmanifest.File, progress c
 	close(u.commiters.Channel)
 	u.commiters.Wait()
 
+	close(u.errors)
 }

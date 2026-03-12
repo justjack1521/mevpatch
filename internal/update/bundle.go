@@ -3,225 +3,181 @@ package update
 import (
 	"archive/zip"
 	"fmt"
-	mevmanifest "github.com/justjack1521/mevmanifest/pkg/genproto"
-	"github.com/justjack1521/mevpatch/internal/file"
-	"github.com/justjack1521/mevpatch/internal/patch"
-	uuid "github.com/satori/go.uuid"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+
+	mevmanifest "github.com/justjack1521/mevmanifest/pkg/genproto"
+	"github.com/justjack1521/mevpatch/internal/file"
+	"github.com/justjack1521/mevpatch/internal/patch"
+	uuid "github.com/satori/go.uuid"
 )
 
-var (
-	errFailedDownloadBundle = func(bundle *mevmanifest.Bundle, err error) error {
-		return fmt.Errorf("failed to download patch bundle at %s: %w", bundle.Version, err)
-	}
-	errUnexpectedStatusCode = func(url string, code int) error {
-		return fmt.Errorf("unexpected status code %s: %d", url, code)
-	}
-	errFailedUnzipBundle = func(err error) error {
-		return fmt.Errorf("failed to unzip bundle: %w", err)
-	}
-	errFailedUnpackFile = func(name string, err error) error {
-		return fmt.Errorf("failed to unpack patch file %s: %w", name, err)
-	}
-	errPatchFileNotFound = func(version patch.Version) error {
-		return fmt.Errorf("patch file not found in manifest for version %s", version.String())
-	}
-	errPatchFileSizeMismatch = func(actual int64, expected int64) error {
-		return fmt.Errorf("mismatch file size, expected %d got %d", expected, actual)
-	}
-	errPatchChecksumMismatch = func(actual string, expected string) error {
-		return fmt.Errorf("mistmatch checksum, expected %s got %s", expected, actual)
-	}
-)
-
+// BundleDownloader downloads and extracts the patch bundle for the current version.
 type BundleDownloader struct {
-	app     string
+	app string
+	// remotes maps file UUID → manifest file, for all files that need patching.
 	remotes map[uuid.UUID]*mevmanifest.File
 }
 
 func NewBundleDownloader(app string, plan *Plan) *BundleDownloader {
-	var downloader = &BundleDownloader{
-		app: app,
+	d := &BundleDownloader{
+		app:     app,
+		remotes: make(map[uuid.UUID]*mevmanifest.File),
 	}
-	downloader.remotes = make(map[uuid.UUID]*mevmanifest.File)
-	for _, file := range plan.FilesRequireDownload {
-		id, err := uuid.FromString(file.Id)
+	for _, f := range plan.FilesRequirePatch {
+		id, err := uuid.FromString(f.Id)
 		if err != nil || uuid.Equal(id, uuid.Nil) {
 			continue
 		}
-		downloader.remotes[id] = file
+		d.remotes[id] = f
 	}
-	for _, file := range plan.FilesRequirePatch {
-		id, err := uuid.FromString(file.Id)
-		if err != nil || uuid.Equal(id, uuid.Nil) {
-			continue
-		}
-		downloader.remotes[id] = file
-	}
-	return downloader
+	return d
 }
 
-func (d *BundleDownloader) unpack(current patch.Version, file *zip.File, remote *mevmanifest.File, done chan<- bool) (*patch.RemoteFileMergeJob, error) {
+// Download fetches the bundle zip from the remote and saves it to a temp path.
+// progress receives byte-count increments during the download.
+func (d *BundleDownloader) Download(targetVersion patch.Version, bundle *mevmanifest.Bundle, progress chan<- float32) error {
+	defer close(progress)
 
-	var target *mevmanifest.PatchFile
-	for _, child := range remote.Patches {
-		if child.Version == current.String() {
-			target = child
-			break
-		}
-	}
-
-	if target == nil {
-		return nil, errFailedUnpackFile(file.Name, errPatchFileNotFound(current))
-	}
-
-	zf, err := file.Open()
-	if err != nil {
-		return nil, errFailedUnpackFile(file.Name, err)
-	}
-	defer zf.Close()
-
-	var buffer []byte
-	buffer, err = io.ReadAll(zf)
-	if err != nil {
-		return nil, errFailedUnpackFile(file.Name, err)
-	}
-
-	var size = int64(len(buffer))
-	if size != target.Size {
-		return nil, errFailedUnpackFile(file.Name, errPatchFileSizeMismatch(size, target.Size))
-	}
-
-	var checksum = patch.GetChecksumForBytes(buffer)
-	if checksum != target.Checksum {
-		return nil, errFailedUnpackFile(file.Name, errPatchChecksumMismatch(checksum, target.Checksum))
-	}
-
-	var path = d.path(d.app, filepath.Join("extract", file.Name))
-
-	if err := os.MkdirAll(filepath.Dir(path), os.ModePerm); err != nil {
-		return nil, errFailedUnpackFile(file.Name, err)
-	}
-
-	if err = os.WriteFile(path, buffer, 0664); err != nil {
-		return nil, errFailedUnpackFile(file.Name, err)
-	}
-
-	done <- true
-
-	return &patch.RemoteFileMergeJob{
-		ParentFile:        remote,
-		PatchFile:         target,
-		PatchFileTempPath: path,
-	}, nil
-
-}
-
-func (d *BundleDownloader) Unzip(current patch.Version, target patch.Version, done chan<- bool) ([]*patch.RemoteFileMergeJob, error) {
-
-	defer close(done)
-
-	destination, err := file.PatchBundlePath(d.app, target.String())
-	if err != nil {
-		return nil, errFailedUnzipBundle(err)
-	}
-	defer os.Remove(destination)
-
-	reader, err := zip.OpenReader(destination)
-	if err != nil {
-		return nil, errFailedUnzipBundle(err)
-	}
-	defer reader.Close()
-
-	var results = make([]*patch.RemoteFileMergeJob, 0)
-
-	for _, f := range reader.File {
-
-		fmt.Println(fmt.Sprintf("[File Unzip] Started %s", f.Name))
-
-		var name = strings.TrimSuffix(f.Name, ".jdf")
-		id, err := uuid.FromString(name)
-		if err != nil {
-			fmt.Println(fmt.Sprintf("[File Unzip] Skipped %s", f.Name))
-			continue
-		}
-
-		remote, exists := d.remotes[id]
-		if exists == false {
-			fmt.Println(fmt.Sprintf("[File Unzip] Skipped %s", f.Name))
-			continue
-		}
-
-		result, err := d.unpack(current, f, remote, done)
-		if err != nil {
-			fmt.Println(fmt.Sprintf("[File Unzip] Failed %s", f.Name))
-			return nil, errFailedUnzipBundle(err)
-		}
-
-		results = append(results, result)
-		fmt.Println(fmt.Sprintf("[File Unzip] Complete %s", f.Name))
-
-	}
-
-	return results, nil
-
-}
-
-func (d *BundleDownloader) Download(version patch.Version, bundle *mevmanifest.Bundle, done chan<- float32) error {
-
-	defer close(done)
-
-	destination, err := file.PatchBundlePath(d.app, version.String())
-	if err != nil {
-		return errFailedDownloadBundle(bundle, err)
-	}
-
-	response, err := http.Get(bundle.DownloadPath)
-	if err != nil {
-		return errFailedDownloadBundle(bundle, err)
-	}
-	defer response.Body.Close()
-
-	if response.StatusCode != http.StatusOK {
-		return errFailedDownloadBundle(bundle, errUnexpectedStatusCode(bundle.DownloadPath, response.StatusCode))
-	}
-
+	destination := file.PatchBundlePath(d.app, targetVersion.String())
 	if err := os.MkdirAll(filepath.Dir(destination), os.ModePerm); err != nil {
-		return errFailedDownloadBundle(bundle, err)
+		return fmt.Errorf("creating bundle dir: %w", err)
+	}
+
+	resp, err := http.Get(bundle.DownloadPath)
+	if err != nil {
+		return fmt.Errorf("downloading bundle from %s: %w", bundle.DownloadPath, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unexpected status %d downloading bundle from %s", resp.StatusCode, bundle.DownloadPath)
 	}
 
 	out, err := os.Create(destination)
 	if err != nil {
-		return errFailedDownloadBundle(bundle, err)
+		return fmt.Errorf("creating bundle file: %w", err)
 	}
 	defer out.Close()
 
-	var buffer = make([]byte, 1024*16)
+	buf := make([]byte, 32*1024)
 	for {
-		next, err := response.Body.Read(buffer)
-		if next > 0 {
-			_, err := out.Write(buffer[:next])
-			if err != nil {
-				return err
+		n, readErr := resp.Body.Read(buf)
+		if n > 0 {
+			if _, writeErr := out.Write(buf[:n]); writeErr != nil {
+				return fmt.Errorf("writing bundle: %w", writeErr)
 			}
-			done <- float32(next)
+			progress <- float32(n)
 		}
-		if err == io.EOF {
+		if readErr == io.EOF {
 			break
 		}
-		if err != nil {
-			return err
+		if readErr != nil {
+			return fmt.Errorf("reading bundle response: %w", readErr)
 		}
 	}
 
 	return nil
-
 }
 
-func (d *BundleDownloader) path(app string, normal string) string {
-	return filepath.Clean(filepath.Join(os.TempDir(), "mevpatch", app, normal))
+// Unzip extracts the bundle, verifies each entry, and returns merge jobs.
+// done receives one signal per successfully extracted file.
+func (d *BundleDownloader) Unzip(currentVersion patch.Version, targetVersion patch.Version, done chan<- bool) ([]*patch.RemoteFileMergeJob, error) {
+	defer close(done)
+
+	destination := file.PatchBundlePath(d.app, targetVersion.String())
+	defer os.Remove(destination)
+
+	reader, err := zip.OpenReader(destination)
+	if err != nil {
+		return nil, fmt.Errorf("opening bundle zip: %w", err)
+	}
+	defer reader.Close()
+
+	var results []*patch.RemoteFileMergeJob
+
+	for _, entry := range reader.File {
+		fmt.Printf("[Bundle] Extracting %s\n", entry.Name)
+
+		// Entry names are "{uuid}.jdf" — strip suffix to get UUID.
+		name := strings.TrimSuffix(entry.Name, filepath.Ext(entry.Name))
+		id, err := uuid.FromString(name)
+		if err != nil {
+			fmt.Printf("[Bundle] Skipping unrecognised entry: %s\n", entry.Name)
+			continue
+		}
+
+		remote, exists := d.remotes[id]
+		if !exists {
+			fmt.Printf("[Bundle] Skipping entry not in plan: %s\n", entry.Name)
+			continue
+		}
+
+		job, err := d.extractEntry(entry, remote, currentVersion)
+		if err != nil {
+			return nil, fmt.Errorf("extracting %s: %w", entry.Name, err)
+		}
+
+		results = append(results, job)
+		done <- true
+		fmt.Printf("[Bundle] Extracted %s → %s\n", entry.Name, remote.Path)
+	}
+
+	return results, nil
+}
+
+func (d *BundleDownloader) extractEntry(
+	entry *zip.File,
+	remote *mevmanifest.File,
+	currentVersion patch.Version,
+) (*patch.RemoteFileMergeJob, error) {
+	// Find the PatchFile metadata for our current version inside the manifest entry.
+	var patchMeta *mevmanifest.PatchFile
+	for _, p := range remote.Patches {
+		if p.Version == currentVersion.String() {
+			patchMeta = p
+			break
+		}
+	}
+	if patchMeta == nil {
+		return nil, fmt.Errorf("no patch metadata for version %s in file %s", currentVersion.String(), remote.Path)
+	}
+
+	rc, err := entry.Open()
+	if err != nil {
+		return nil, fmt.Errorf("opening zip entry: %w", err)
+	}
+	defer rc.Close()
+
+	buf, err := io.ReadAll(rc)
+	if err != nil {
+		return nil, fmt.Errorf("reading zip entry: %w", err)
+	}
+
+	// Verify size and checksum of the extracted patch file.
+	if int64(len(buf)) != patchMeta.Size {
+		return nil, fmt.Errorf("patch file size mismatch: expected %d got %d", patchMeta.Size, len(buf))
+	}
+	checksum := patch.GetChecksumForBytes(buf)
+	if checksum != patchMeta.Checksum {
+		return nil, fmt.Errorf("patch file checksum mismatch for %s: expected %s got %s",
+			remote.Path, patchMeta.Checksum, checksum)
+	}
+
+	// Write verified bytes to a temp path.
+	extractPath := file.ExtractPath(d.app, entry.Name)
+	if err := os.MkdirAll(filepath.Dir(extractPath), os.ModePerm); err != nil {
+		return nil, fmt.Errorf("creating extract dir: %w", err)
+	}
+	if err := os.WriteFile(extractPath, buf, 0644); err != nil {
+		return nil, fmt.Errorf("writing extracted patch: %w", err)
+	}
+
+	return &patch.RemoteFileMergeJob{
+		ParentFile:        remote,
+		PatchFileTempPath: extractPath,
+	}, nil
 }

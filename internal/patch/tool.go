@@ -4,64 +4,42 @@ import (
 	"bytes"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 )
 
+// MergeTool wraps hpatchz, which applies a binary diff to a target file in-place.
+// Command: hpatchz -f <target> <patch> <target>
 type MergeTool struct {
-	Path string
+	Path string // full path to the hpatchz executable
+	Dir  string // temp directory to remove on cleanup
 }
 
 func NewMergeTool(path string) *MergeTool {
 	return &MergeTool{Path: path}
 }
 
-func (m *MergeTool) Merge(target string, patch string) error {
-
-	var cmd = exec.Command(m.Path, "-f", target, patch, target)
-
-	fmt.Println(cmd.String())
-
+// Apply applies patchFile to targetFile, overwriting it in-place.
+func (m *MergeTool) Apply(targetFile string, patchFile string) error {
+	cmd := newCmd(m.Path, "-f", targetFile, patchFile, targetFile)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
-
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to apply patch: %w; stderr: %s", err, stderr.String())
+		return fmt.Errorf("hpatchz failed on %q: %w (stderr: %s)", targetFile, err, stderr.String())
 	}
-
 	return nil
 }
 
-func CreateMergeTool(bytes []byte) (*MergeTool, error) {
-
-	tempDir, err := os.MkdirTemp("", "hpatchz-*")
+// CreateMergeTool extracts the embedded hpatchz binary to a temp directory.
+// Caller must defer os.RemoveAll(tool.Dir) to clean up.
+func CreateMergeTool(binary []byte) (*MergeTool, error) {
+	dir, err := os.MkdirTemp("", "hpatchz-*")
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("creating hpatchz temp dir: %w", err)
 	}
-
-	filePath := filepath.Join(tempDir, "hpatchz.exe")
-
-	file, err := os.Create(filePath)
-	if err != nil {
-		return nil, err
+	path := filepath.Join(dir, "hpatchz.exe")
+	if err := os.WriteFile(path, binary, 0755); err != nil {
+		os.RemoveAll(dir)
+		return nil, fmt.Errorf("writing hpatchz binary: %w", err)
 	}
-
-	if _, err := file.Write(bytes); err != nil {
-		os.Remove(file.Name())
-		return nil, err
-	}
-
-	if err := file.Close(); err != nil {
-		os.Remove(file.Name())
-		return nil, err
-	}
-
-	if err := os.Chmod(filePath, 0755); err != nil {
-		file.Close()
-		os.Remove(filePath)
-		return nil, err
-	}
-
-	return NewMergeTool(file.Name()), nil
-
+	return &MergeTool{Path: path, Dir: dir}, nil
 }

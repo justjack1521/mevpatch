@@ -1,77 +1,42 @@
 package orchestrate
 
 import (
-	"encoding/json"
 	"fmt"
-	"github.com/justjack1521/mevpatch/internal/file"
+
 	"github.com/justjack1521/mevpatch/internal/patch"
-	"os"
-	"path/filepath"
 )
 
-const (
-	PrimaryStatusUpdateCheckingVersion = "Checking current version"
-)
+// VersionCheckStep loads the local InstallState and determines the currently
+// installed version. If no state file exists this is treated as a fresh install.
+type VersionCheckStep struct{}
 
-const (
-	SecondaryStatusUpdateNoVersionFound = "No installed version found"
-)
+func NewVersionCheckStep() *VersionCheckStep { return &VersionCheckStep{} }
 
-var (
-	SecondaryStatusUpdateCurrentVersionFound = func(version patch.Version) string {
-		return fmt.Sprintf("Current version found as %s", version.String())
-	}
-	SecondaryStatusUpdateInvalidVersionFound = func(version string) string {
-		return fmt.Sprintf("Invalid version found as %s", version)
-	}
-)
+func (s *VersionCheckStep) Run(ctx *Context, o *Orchestrator) error {
+	o.SendPrimaryStatusUpdate("Checking installed version...")
 
-type VersionCheckStep struct {
-}
-
-func NewVersionCheckStep() *VersionCheckStep {
-	return &VersionCheckStep{}
-}
-
-func (s *VersionCheckStep) Run(ctx *Context, orchestrator *Orchestrator) error {
-
-	orchestrator.SendPrimaryStatusUpdate(PrimaryStatusUpdateCheckingVersion)
-
-	patcher, err := file.PatcherPath()
+	state, err := patch.LoadInstallState(ctx.ApplicationName)
 	if err != nil {
-		return err
+		return fmt.Errorf("loading install state: %w", err)
 	}
-	var path = filepath.Join(patcher, fmt.Sprintf("%s.json", ctx.ApplicationName))
+	ctx.State = state
 
-	if err := file.ExistsAtPath(path); err != nil {
-		ctx.CurrentVersion = patch.Version{Major: 1, Minor: 0, Patch: 0}
-		orchestrator.SendSecondaryStatusUpdate(SecondaryStatusUpdateNoVersionFound)
+	if state.Version == "" {
+		ctx.CurrentVersion = patch.Version{} // zero → fresh install
+		o.SendSecondaryStatusUpdate("No previous installation found")
 		return nil
 	}
 
-	f, err := os.Open(path)
+	current, err := patch.NewVersion(state.Version)
 	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	var state = &patch.State{}
-	var decoder = json.NewDecoder(f)
-	if err := decoder.Decode(state); err != nil {
-		return err
-	}
-
-	current, err := patch.NewVersion(state.LocalHash)
-	if err != nil {
-		ctx.CurrentVersion = patch.Version{Major: 1, Minor: 0, Patch: 0}
-		orchestrator.SendSecondaryStatusUpdate(SecondaryStatusUpdateNoVersionFound)
+		// Corrupt version string — treat as fresh install rather than crash.
+		fmt.Printf("[Version] Warning: unreadable version %q in state, treating as fresh install\n", state.Version)
+		ctx.CurrentVersion = patch.Version{}
+		o.SendSecondaryStatusUpdate("No previous installation found")
 		return nil
 	}
 
 	ctx.CurrentVersion = current
-	ctx.LocalState = state
-	orchestrator.SendSecondaryStatusUpdate(SecondaryStatusUpdateCurrentVersionFound(ctx.CurrentVersion))
-
+	o.SendSecondaryStatusUpdate(fmt.Sprintf("Installed version: %s", current.String()))
 	return nil
-
 }

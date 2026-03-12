@@ -2,37 +2,37 @@ package patch
 
 import (
 	"fmt"
-	"github.com/justjack1521/mevpatch/internal/file"
 )
 
+// RemotePatchFileMerger orchestrates parallel patch-apply operations.
 type RemotePatchFileMerger struct {
-	Application string
+	application string
 	patchers    *RemoteFileMergeWorkerGroup
 	commiters   *FileMetadataCommitWorkerGroup
 	errors      chan error
 }
 
-func NewRemotePatchFileMerger(app string, tool *MergeTool, files file.Repository) *RemotePatchFileMerger {
+func NewRemotePatchFileMerger(app string, tool *MergeTool, state *InstallState) *RemotePatchFileMerger {
 	return &RemotePatchFileMerger{
-		Application: app,
-		patchers:    NewRemoteFileMergeWorkerGroup(tool, 10),
-		commiters:   NewFileMetadataCommitWorkerGroup(files, 10),
-		errors:      make(chan error, 10),
+		application: app,
+		patchers:    NewRemoteFileMergeWorkerGroup(tool, 4),
+		commiters:   NewFileMetadataCommitWorkerGroup(state, 4),
+		errors:      make(chan error, 20),
 	}
 }
 
+// Start applies all jobs concurrently and blocks until complete.
 func (u *RemotePatchFileMerger) Start(jobs []*RemoteFileMergeJob) {
-
 	defer close(u.errors)
 
 	go func() {
 		for err := range u.errors {
-			fmt.Printf("Error: %v\n", err)
+			fmt.Printf("[Patch Merger] Error: %v\n", err)
 		}
 	}()
 
-	u.patchers.Start(u.Application, u.commiters.Channel, u.errors)
-	u.commiters.Start(u.Application, u.errors)
+	u.patchers.Start(u.application, u.commiters.Channel, u.errors)
+	u.commiters.Start(u.application, u.errors)
 
 	for _, job := range jobs {
 		u.patchers.channel <- job
@@ -43,5 +43,4 @@ func (u *RemotePatchFileMerger) Start(jobs []*RemoteFileMergeJob) {
 
 	close(u.commiters.Channel)
 	u.commiters.Wait()
-
 }

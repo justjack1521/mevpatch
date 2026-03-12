@@ -2,19 +2,21 @@ package patch
 
 import (
 	"fmt"
-	"github.com/justjack1521/mevpatch/internal/file"
-	uuid "github.com/satori/go.uuid"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"sync"
+
+	"github.com/justjack1521/mevpatch/internal/file"
 )
 
+// RemoteFileSourceJob is a request to download a single source file.
 type RemoteFileSourceJob struct {
-	JobID uuid.UUID
-	Path  string
+	Path     string
+	Checksum string
+	Size     int64
 }
 
 type RemoteFileSourceWorker struct {
@@ -22,11 +24,116 @@ type RemoteFileSourceWorker struct {
 	application string
 	host        string
 	sources     <-chan *RemoteFileSourceJob
-	commit      chan<- *FileMetadataCommitJob
+	commits     chan<- *FileMetadataCommitJob
 	progress    chan<- float32
 	errors      chan<- error
 }
 
+func NewRemoteFileSourceWorker(
+	wg *sync.WaitGroup,
+	app, host string,
+	input <-chan *RemoteFileSourceJob,
+	commits chan<- *FileMetadataCommitJob,
+	progress chan<- float32,
+	errors chan<- error,
+) *RemoteFileSourceWorker {
+	return &RemoteFileSourceWorker{
+		wg: wg, application: app, host: host,
+		sources: input, commits: commits, progress: progress, errors: errors,
+	}
+}
+
+func (w *RemoteFileSourceWorker) Run() {
+	defer w.wg.Done()
+	for job := range w.sources {
+		fmt.Printf("[Source] Downloading: %s\n", job.Path)
+		if err := w.run(job); err != nil {
+			fmt.Printf("[Source] Failed: %s: %v\n", job.Path, err)
+			w.errors <- err
+		} else {
+			fmt.Printf("[Source] Done: %s\n", job.Path)
+		}
+	}
+}
+
+func (w *RemoteFileSourceWorker) run(job *RemoteFileSourceJob) error {
+	destination, err := file.PersistentPath(w.application, job.Path)
+	if err != nil {
+		return fmt.Errorf("resolving path for %s: %w", job.Path, err)
+	}
+
+	uri, err := url.JoinPath(w.host, "downloads", w.application, "source", job.Path)
+	if err != nil {
+		return fmt.Errorf("building URL for %s: %w", job.Path, err)
+	}
+
+	resp, err := http.Get(uri)
+	if err != nil {
+		return fmt.Errorf("GET %s: %w", uri, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unexpected status %d for %s", resp.StatusCode, uri)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(destination), os.ModePerm); err != nil {
+		return fmt.Errorf("creating directories for %s: %w", destination, err)
+	}
+
+	// Write to a temp file first so a failed download doesn't leave a corrupt file.
+	tmp := destination + ".tmp"
+	out, err := os.Create(tmp)
+	if err != nil {
+		return fmt.Errorf("creating temp file for %s: %w", destination, err)
+	}
+
+	buf := make([]byte, 32*1024)
+	var written int64
+	for {
+		n, readErr := resp.Body.Read(buf)
+		if n > 0 {
+			wn, writeErr := out.Write(buf[:n])
+			written += int64(wn)
+			w.progress <- float32(wn)
+			if writeErr != nil {
+				out.Close()
+				os.Remove(tmp)
+				return fmt.Errorf("writing %s: %w", destination, writeErr)
+			}
+		}
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			out.Close()
+			os.Remove(tmp)
+			return fmt.Errorf("reading response for %s: %w", job.Path, readErr)
+		}
+	}
+	out.Close()
+
+	// Verify checksum before committing.
+	checksum, err := GetChecksumForPath(tmp)
+	if err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("checksumming download for %s: %w", job.Path, err)
+	}
+	if checksum != job.Checksum {
+		os.Remove(tmp)
+		return fmt.Errorf("checksum mismatch for %s: expected %s got %s", job.Path, job.Checksum, checksum)
+	}
+
+	if err := os.Rename(tmp, destination); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("committing download for %s: %w", job.Path, err)
+	}
+
+	w.commits <- &FileMetadataCommitJob{Path: job.Path, Size: written, Checksum: checksum}
+	return nil
+}
+
+// RemoteFileSourceWorkerGroup manages a pool of source download workers.
 type RemoteFileSourceWorkerGroup struct {
 	wg      *sync.WaitGroup
 	channel chan *RemoteFileSourceJob
@@ -41,102 +148,17 @@ func NewRemoteFileSourceWorkerGroup(count int) *RemoteFileSourceWorkerGroup {
 	}
 }
 
-func (g *RemoteFileSourceWorkerGroup) Wait() {
-	g.wg.Wait()
-}
-
-func (g *RemoteFileSourceWorkerGroup) Start(app string, host string, output chan<- *FileMetadataCommitJob, progress chan<- float32, errors chan<- error) {
+func (g *RemoteFileSourceWorkerGroup) Start(
+	app, host string,
+	commits chan<- *FileMetadataCommitJob,
+	progress chan<- float32,
+	errors chan<- error,
+) {
 	g.wg.Add(g.count)
 	for i := 0; i < g.count; i++ {
-		var worker = NewRemoteFileSourceWorker(g.wg, app, host, g.channel, output, progress, errors)
-		go worker.Run()
+		w := NewRemoteFileSourceWorker(g.wg, app, host, g.channel, commits, progress, errors)
+		go w.Run()
 	}
 }
 
-func NewRemoteFileSourceWorker(wg *sync.WaitGroup, app string, host string, input <-chan *RemoteFileSourceJob, output chan<- *FileMetadataCommitJob, progress chan<- float32, errors chan<- error) *RemoteFileSourceWorker {
-	return &RemoteFileSourceWorker{wg: wg, application: app, host: host, sources: input, commit: output, progress: progress, errors: errors}
-}
-
-func (w *RemoteFileSourceWorker) Run() {
-
-	defer w.wg.Done()
-
-	for job := range w.sources {
-		fmt.Println(fmt.Sprintf("[Remote Sourcing] Started: %s", job.Path))
-		if err := w.run(job); err != nil {
-			fmt.Println(fmt.Sprintf("[Remote Sourcing] Failed: %s", job.Path))
-			w.errors <- err
-			continue
-		}
-		fmt.Println(fmt.Sprintf("[Remote Sourcing] Completed: %s", job.Path))
-	}
-
-}
-
-func (w *RemoteFileSourceWorker) run(job *RemoteFileSourceJob) error {
-
-	destination, err := file.PersistentPath(w.application, job.Path)
-	if err != nil {
-		return fmt.Errorf("failed to get persistent file: %w", err)
-	}
-
-	uri, err := url.JoinPath(w.host, "downloads", w.application, "source", job.Path)
-	if err != nil {
-		return fmt.Errorf("failed to get join url path: %w", err)
-	}
-
-	response, err := http.Get(uri)
-	if err != nil {
-		return fmt.Errorf("failed to get remote file: %w", err)
-	}
-	defer response.Body.Close()
-
-	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("unexpected status code %d for %s", response.StatusCode, uri)
-	}
-
-	if err := os.MkdirAll(filepath.Dir(destination), os.ModePerm); err != nil {
-		return fmt.Errorf("failed to create destination path: %w", err)
-	}
-
-	out, err := os.Create(destination)
-	if err != nil {
-		return fmt.Errorf("failed to create destination: %w", err)
-	}
-	defer out.Close()
-
-	var total int64
-
-	var buffer = make([]byte, 1024*16)
-	for {
-		next, err := response.Body.Read(buffer)
-		if next > 0 {
-			written, err := out.Write(buffer[:next])
-			if err != nil {
-				return fmt.Errorf("failed to write to buffer: %w", err)
-			}
-			total += int64(written)
-			w.progress <- float32(next)
-		}
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return fmt.Errorf("failed to read from buffer: %s", err)
-		}
-	}
-
-	checksum, err := GetChecksumForPath(destination)
-	if err != nil {
-		return fmt.Errorf("failed to get checksum for path: %w", err)
-	}
-
-	w.commit <- &FileMetadataCommitJob{
-		Path:     job.Path,
-		Size:     total,
-		Checksum: checksum,
-	}
-
-	return nil
-
-}
+func (g *RemoteFileSourceWorkerGroup) Wait() { g.wg.Wait() }

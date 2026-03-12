@@ -6,35 +6,66 @@ import (
 	"path/filepath"
 )
 
-func TemporaryPath(app string, normal string) (string, error) {
-	var path = filepath.Join(os.TempDir(), "mevpatch", app, normal)
-	return filepath.Clean(path), nil
-}
-
-func PatcherPath() (string, error) {
+// PatcherDir returns the directory containing the patcher executable.
+func PatcherDir() (string, error) {
 	own, err := os.Executable()
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("resolving executable path: %w", err)
 	}
-	return filepath.Clean(filepath.Dir(own)), nil
+	return filepath.Dir(own), nil
 }
 
+// PersistentPath resolves a normalised file path to its location on disk.
+//
+// Directory layout:
+//
+//	game_root/            ← launcher files live here (app == "launcher")
+//	game_root/Game/       ← game files live here    (app == "game")
+//	game_root/Patching/   ← patcher exe lives here
+//
+// So relative to the patcher exe:
+//
+//	launcher files → ../../{normal}
+//	game files     → ../../Game/{normal}
 func PersistentPath(app string, normal string) (string, error) {
-	own, err := os.Executable()
+	patcher, err := PatcherDir()
 	if err != nil {
 		return "", err
 	}
 	var path string
-	if app == "launcher" {
-		path = filepath.Join(filepath.Dir(own), "..", "..", normal)
-	} else {
-		path = filepath.Join(filepath.Dir(own), "..", "..", app, normal)
+	switch app {
+	case "launcher":
+		path = filepath.Join(patcher, "..", "..", normal)
+	default:
+		// All other apps (including "game") live in a subdirectory of game_root
+		// whose name matches the app name with correct casing.
+		// We use "Game" as the canonical folder name for "game".
+		path = filepath.Join(patcher, "..", "..", "Game", normal)
 	}
 	return filepath.Clean(path), nil
-
 }
 
-func PatchBundlePath(app string, version string) (string, error) {
-	var normal = filepath.Join("bin", fmt.Sprintf("%s_patch.bin", version))
-	return TemporaryPath(app, normal)
+// VersionFilePath returns the path to an app's version file.
+// Stored as game_root/Patching/{app}.version, right next to the patcher exe.
+func VersionFilePath(app string) (string, error) {
+	patcher, err := PatcherDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(patcher, fmt.Sprintf("%s.version", app)), nil
+}
+
+// TemporaryPath returns a path under the OS temp directory for scratch files.
+func TemporaryPath(app string, normal string) string {
+	return filepath.Clean(filepath.Join(os.TempDir(), "mevpatch", app, normal))
+}
+
+// PatchBundlePath returns the temp path for a downloaded patch bundle zip.
+func PatchBundlePath(app string, version string) string {
+	return TemporaryPath(app, filepath.Join("bundles", fmt.Sprintf("%s_patch.bin", version)))
+}
+
+// ExtractPath returns the temp path for extracted patch files.
+func ExtractPath(app string, name string) string {
+	return TemporaryPath(app, filepath.Join("extract", name))
 }
