@@ -2,23 +2,25 @@ package patch
 
 import (
 	"fmt"
+
 	mevmanifest "github.com/justjack1521/mevmanifest/pkg/genproto"
 )
 
-const remoteHost = "https://mevius-patch-us.sfo3.digitaloceanspaces.com"
+const remoteHost = "https://patch.blankproject.dev"
 
-// RemoteSourceFileDownloader orchestrates parallel source file downloads
-// for a list of manifest files that need a full download.
+// RemoteSourceFileDownloader orchestrates parallel source file downloads.
 type RemoteSourceFileDownloader struct {
 	application string
+	version     string
 	sourcers    *RemoteFileSourceWorkerGroup
 	commiters   *FileMetadataCommitWorkerGroup
 	errors      chan error
 }
 
-func NewRemoteSourceFileDownloader(app string, state *InstallState) *RemoteSourceFileDownloader {
+func NewRemoteSourceFileDownloader(app string, version string, state *InstallState) *RemoteSourceFileDownloader {
 	return &RemoteSourceFileDownloader{
 		application: app,
+		version:     version,
 		sourcers:    NewRemoteFileSourceWorkerGroup(8),
 		commiters:   NewFileMetadataCommitWorkerGroup(state, 8),
 		errors:      make(chan error, 20),
@@ -26,13 +28,11 @@ func NewRemoteSourceFileDownloader(app string, state *InstallState) *RemoteSourc
 }
 
 // Start downloads all files concurrently and blocks until complete.
-// progress receives bytes-written increments for each chunk downloaded.
-func (u *RemoteSourceFileDownloader) Start(files []*mevmanifest.File, progress chan<- float32) {
-	defer close(progress)
-
+// progress receives a SourceProgress per chunk/file for UI updates.
+func (u *RemoteSourceFileDownloader) Start(files []*mevmanifest.File, progress chan<- SourceProgress) {
 	go func() {
 		for err := range u.errors {
-			fmt.Printf("[Source Downloader] Error: %v\n", err)
+			fmt.Printf("[Source] Error: %v\n", err)
 		}
 	}()
 
@@ -41,9 +41,10 @@ func (u *RemoteSourceFileDownloader) Start(files []*mevmanifest.File, progress c
 
 	for _, f := range files {
 		u.sourcers.channel <- &RemoteFileSourceJob{
-			Path:     f.Path,
-			Checksum: f.Checksum,
-			Size:     f.Size,
+			Path:          f.Path,
+			Checksum:      f.Checksum,
+			Size:          f.Size,
+			SourceVersion: u.version,
 		}
 	}
 
@@ -54,4 +55,5 @@ func (u *RemoteSourceFileDownloader) Start(files []*mevmanifest.File, progress c
 	u.commiters.Wait()
 
 	close(u.errors)
+	close(progress)
 }

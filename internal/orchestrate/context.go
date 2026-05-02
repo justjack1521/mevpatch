@@ -14,6 +14,7 @@ type Context struct {
 	ApplicationName string
 	CurrentVersion  patch.Version // installed version, zero if fresh install
 	TargetVersion   patch.Version
+	SourceVersion   patch.Version // rebase version read from manifest
 
 	State    *patch.InstallState
 	Manifest *mevmanifest.Manifest

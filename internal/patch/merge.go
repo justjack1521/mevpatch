@@ -2,10 +2,11 @@ package patch
 
 import (
 	"fmt"
-	mevmanifest "github.com/justjack1521/mevmanifest/pkg/genproto"
-	"github.com/justjack1521/mevpatch/internal/file"
 	"os"
 	"sync"
+
+	mevmanifest "github.com/justjack1521/mevmanifest/pkg/genproto"
+	"github.com/justjack1521/mevpatch/internal/file"
 )
 
 // RemoteFileMergeJob describes a single patch-apply operation.
@@ -21,6 +22,7 @@ type RemoteFileMergeJob struct {
 type RemoteFileMergeWorker struct {
 	group       *sync.WaitGroup
 	application string
+	debug       bool
 	tool        *MergeTool
 	patches     <-chan *RemoteFileMergeJob
 	commits     chan<- *FileMetadataCommitJob
@@ -44,12 +46,18 @@ func NewRemoteFileMergeWorker(
 func (w *RemoteFileMergeWorker) Run() {
 	defer w.group.Done()
 	for job := range w.patches {
-		fmt.Printf("[Merge] Applying patch: %s\n", job.ParentFile.Path)
+		if w.debug {
+			fmt.Printf("[Merge] Applying patch: %s\n", job.ParentFile.Path)
+		}
 		if err := w.run(job); err != nil {
-			fmt.Printf("[Merge] Failed: %s: %v\n", job.ParentFile.Path, err)
+			if w.debug {
+				fmt.Printf("[Merge] Failed: %s: %v\n", job.ParentFile.Path, err)
+			}
 			w.errors <- err
 		} else {
-			fmt.Printf("[Merge] Done: %s\n", job.ParentFile.Path)
+			if w.debug {
+				fmt.Printf("[Merge] Done: %s\n", job.ParentFile.Path)
+			}
 		}
 	}
 }

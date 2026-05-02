@@ -1,18 +1,17 @@
-package gui
+package terminal
 
 import (
 	"errors"
 	"fmt"
 	"os"
 	"strings"
-	"time"
 	"unicode"
 
 	"github.com/charmbracelet/bubbles/progress"
 	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/justjack1521/mevpatch/internal/gui"
 	"github.com/justjack1521/mevpatch/internal/patch"
 )
 
@@ -25,29 +24,23 @@ var (
 	styleLabel     = lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Width(12)
 	styleLogNew    = lipgloss.NewStyle().Foreground(lipgloss.Color("15"))
 	styleLogOld    = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	styleLogWarn   = lipgloss.NewStyle().Foreground(lipgloss.Color("11"))
 	styleError     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("9"))
 	styleDone      = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("10"))
 	styleDivider   = lipgloss.NewStyle().Foreground(lipgloss.Color("237"))
 )
 
-const (
-	maxLogLines  = 12
-	barWidth     = 52
-	headerHeight = 10
-)
+const maxLogLines = 6
 
 // ── Messages ──────────────────────────────────────────────────────────────────
 
 type msgDone struct{}
-type msgAutoQuit struct{}
 
 // ── Model ─────────────────────────────────────────────────────────────────────
 
 type model struct {
 	app     string
 	version patch.Version
-	updates <-chan PatchUpdate
+	updates <-chan gui.PatchUpdate
 
 	primary   string
 	secondary string
@@ -57,18 +50,14 @@ type model struct {
 	primaryBar   progress.Model
 	secondaryBar progress.Model
 	spin         spinner.Model
-	vp           viewport.Model
-	vpReady      bool
 
 	primaryValue   float64
 	secondaryValue float64
 
-	logLines []string
-	width    int
-	height   int
+	log []string // recent events, newest last
 }
 
-func newModel(app string, version patch.Version, updates <-chan PatchUpdate) model {
+func newModel(app string, version patch.Version, updates <-chan gui.PatchUpdate) model {
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 	sp.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("12"))
@@ -77,42 +66,21 @@ func newModel(app string, version patch.Version, updates <-chan PatchUpdate) mod
 		app:          app,
 		version:      version,
 		updates:      updates,
-		primaryBar:   progress.New(progress.WithDefaultGradient(), progress.WithWidth(barWidth)),
-		secondaryBar: progress.New(progress.WithScaledGradient("#3B82F6", "#10B981"), progress.WithWidth(barWidth)),
+		primaryBar:   progress.New(progress.WithDefaultGradient(), progress.WithWidth(52)),
+		secondaryBar: progress.New(progress.WithScaledGradient("#3B82F6", "#10B981"), progress.WithWidth(52)),
 		spin:         sp,
 		primary:      "Starting...",
 	}
 }
 
-func (m *model) appendLog(line string) {
-	m.logLines = append(m.logLines, line)
-	if len(m.logLines) > maxLogLines {
-		m.logLines = m.logLines[len(m.logLines)-maxLogLines:]
-	}
-	if m.vpReady {
-		m.vp.SetContent(m.renderLog())
-		m.vp.GotoBottom()
+func (m *model) addLog(line string) {
+	m.log = append(m.log, line)
+	if len(m.log) > maxLogLines {
+		m.log = m.log[len(m.log)-maxLogLines:]
 	}
 }
 
-func (m *model) renderLog() string {
-	var b strings.Builder
-	for i, line := range m.logLines {
-		if i == len(m.logLines)-1 {
-			if strings.HasPrefix(line, "CORRUPT") || strings.HasPrefix(line, "MISSING") {
-				b.WriteString(styleLogWarn.Render(line))
-			} else {
-				b.WriteString(styleLogNew.Render(line))
-			}
-		} else {
-			b.WriteString(styleLogOld.Render(line))
-		}
-		b.WriteString("\n")
-	}
-	return b.String()
-}
-
-func waitForUpdate(ch <-chan PatchUpdate) tea.Cmd {
+func waitForUpdate(ch <-chan gui.PatchUpdate) tea.Cmd {
 	return func() tea.Msg {
 		update, ok := <-ch
 		if !ok {
@@ -127,102 +95,59 @@ func (m model) Init() tea.Cmd {
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	var cmds []tea.Cmd
-
 	switch msg := msg.(type) {
-
-	case tea.WindowSizeMsg:
-		m.width = msg.Width
-		m.height = msg.Height
-		vpHeight := m.height - headerHeight
-		if vpHeight < 3 {
-			vpHeight = 3
-		}
-		if !m.vpReady {
-			m.vp = viewport.New(m.width-2, vpHeight)
-			m.vp.SetContent(m.renderLog())
-			m.vpReady = true
-		} else {
-			m.vp.Width = m.width - 2
-			m.vp.Height = vpHeight
-		}
-		return m, nil
 
 	case tea.KeyMsg:
 		if msg.Type == tea.KeyCtrlC {
 			return m, tea.Quit
 		}
-		if m.errText != "" {
-			return m, tea.Quit
-		}
-		if m.vpReady {
-			var cmd tea.Cmd
-			m.vp, cmd = m.vp.Update(msg)
-			cmds = append(cmds, cmd)
-		}
 
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spin, cmd = m.spin.Update(msg)
-		cmds = append(cmds, cmd)
+		return m, cmd
 
-	case StatusUpdate:
+	case gui.StatusUpdate:
 		if msg.Primary != "" {
 			if m.primary != "" && m.primary != "Starting..." {
-				m.appendLog("✓ " + m.primary)
+				m.addLog("✓ " + m.primary)
 			}
 			m.primary = msg.Primary
 		}
 		if msg.Secondary != "" {
 			m.secondary = msg.Secondary
 		}
-		cmds = append(cmds, waitForUpdate(m.updates))
+		return m, waitForUpdate(m.updates)
 
-	case ProgressUpdate:
-		if msg.ProgressUpdateType == ProgressUpdateTypePrimary {
+	case gui.ProgressUpdate:
+		if msg.ProgressUpdateType == gui.ProgressUpdateTypePrimary {
 			if msg.Reset {
 				m.primaryValue = 0
-			} else if msg.Set {
-				m.primaryValue = clamp(float64(msg.Value))
 			} else {
 				m.primaryValue = clamp(m.primaryValue + float64(msg.Value))
 			}
 		} else {
 			if msg.Reset {
 				m.secondaryValue = 0
-			} else if msg.Set {
-				m.secondaryValue = clamp(float64(msg.Value))
 			} else {
 				m.secondaryValue = clamp(m.secondaryValue + float64(msg.Value))
 			}
 		}
-		cmds = append(cmds,
+		return m, tea.Batch(
 			m.primaryBar.SetPercent(m.primaryValue),
 			m.secondaryBar.SetPercent(m.secondaryValue),
 			waitForUpdate(m.updates),
 		)
 
-	case LogUpdate:
-		m.appendLog(msg.Value)
-		cmds = append(cmds, waitForUpdate(m.updates))
-
-	case ErrorUpdate:
+	case gui.ErrorUpdate:
 		m.errText = formatError(msg.Value)
 		m.finished = true
-		m.primary = "Failed"
-		m.secondary = "Press any key to close"
-		return m, nil
+		return m, tea.Batch(waitForUpdate(m.updates), tea.Quit)
 
 	case msgDone:
-		m.appendLog("✓ " + m.primary)
+		m.addLog("✓ " + m.primary)
 		m.primary = "Up to date!"
 		m.finished = true
-		return m, func() tea.Msg {
-			time.Sleep(2 * time.Second)
-			return msgAutoQuit{}
-		}
-
-	case msgAutoQuit:
 		return m, tea.Quit
 
 	case progress.FrameMsg:
@@ -230,10 +155,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.primaryBar = pm.(progress.Model)
 		sm, sc := m.secondaryBar.Update(msg)
 		m.secondaryBar = sm.(progress.Model)
-		cmds = append(cmds, pc, sc)
+		return m, tea.Batch(pc, sc)
 	}
 
-	return m, tea.Batch(cmds...)
+	return m, nil
 }
 
 func (m model) View() string {
@@ -241,11 +166,14 @@ func (m model) View() string {
 
 	b.WriteString("\n")
 
-	b.WriteString(styleTitle.Render(fmt.Sprintf("  Mevius Patcher  •  %s", strings.ToUpper(m.app))))
+	// ── Title ─────────────────────────────────────────────────────────────
+	title := fmt.Sprintf("  Mevius Patcher  •  %s", strings.ToUpper(m.app))
+	b.WriteString(styleTitle.Render(title))
 	b.WriteString("\n")
 	b.WriteString(styleDivider.Render(strings.Repeat("─", 64)))
 	b.WriteString("\n\n")
 
+	// ── Current status ────────────────────────────────────────────────────
 	if m.finished && m.errText == "" {
 		b.WriteString("  " + styleDone.Render("✓  "+m.primary))
 	} else if m.errText != "" {
@@ -257,32 +185,40 @@ func (m model) View() string {
 
 	if m.secondary != "" {
 		b.WriteString("  " + styleLabel.Render("  ") + styleSecondary.Render(m.secondary))
-	} else {
-		b.WriteString("  ")
+		b.WriteString("\n")
 	}
-	b.WriteString("\n\n")
 
+	b.WriteString("\n")
+
+	// ── Progress bars ─────────────────────────────────────────────────────
 	b.WriteString("  " + styleLabel.Render("Overall") + m.primaryBar.View())
 	b.WriteString("\n")
-	b.WriteString("  " + styleLabel.Render("Files  ") + m.secondaryBar.View())
+	b.WriteString("  " + styleLabel.Render("Files") + m.secondaryBar.View())
 	b.WriteString("\n")
 
-	b.WriteString(styleDivider.Render(strings.Repeat("─", 64)))
-	b.WriteString("\n")
-
-	if m.vpReady {
-		b.WriteString(m.vp.View())
-	}
-
-	if m.errText != "" {
-		wrap := m.width - 4
-		if wrap < 20 {
-			wrap = 20
+	// ── Log ───────────────────────────────────────────────────────────────
+	if len(m.log) > 0 {
+		b.WriteString("\n")
+		b.WriteString(styleDivider.Render(strings.Repeat("─", 64)))
+		b.WriteString("\n")
+		for i, line := range m.log {
+			if i == len(m.log)-1 {
+				b.WriteString("  " + styleLogNew.Render(line))
+			} else {
+				b.WriteString("  " + styleLogOld.Render(line))
+			}
+			b.WriteString("\n")
 		}
-		wrapped := styleError.Width(wrap).Render("Error: " + m.errText)
-		b.WriteString("\n  " + wrapped + "\n")
 	}
 
+	// ── Error ─────────────────────────────────────────────────────────────
+	if m.errText != "" {
+		b.WriteString("\n")
+		b.WriteString("  " + styleError.Render("Error: "+m.errText))
+		b.WriteString("\n")
+	}
+
+	b.WriteString("\n")
 	return b.String()
 }
 
@@ -291,10 +227,10 @@ func (m model) View() string {
 type Window struct {
 	app     string
 	version patch.Version
-	updates <-chan PatchUpdate
+	updates <-chan gui.PatchUpdate
 }
 
-func NewWindow(app string, version patch.Version, updates <-chan PatchUpdate) *Window {
+func NewWindow(app string, version patch.Version, updates <-chan gui.PatchUpdate) *Window {
 	return &Window{app: app, version: version, updates: updates}
 }
 
@@ -304,6 +240,7 @@ func (w *Window) Build() {
 		fmt.Fprintf(os.Stderr, "error running UI: %v\n", err)
 		os.Exit(1)
 	}
+	os.Exit(0)
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

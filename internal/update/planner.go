@@ -2,6 +2,7 @@ package update
 
 import (
 	"fmt"
+
 	mevmanifest "github.com/justjack1521/mevmanifest/pkg/genproto"
 	"github.com/justjack1521/mevpatch/internal/patch"
 )
@@ -28,6 +29,7 @@ type Planner struct {
 	collector   *PlanningResultCollector
 	validators  *FileCacheValidateWorkerGroup
 	errors      chan error
+	debug       bool
 }
 
 func NewPlanner(app string) *Planner {
@@ -49,13 +51,17 @@ func (p *Planner) Start(
 	hasBundleForCurrent := manifest.ContainsVersion(currentVersion)
 	mode := UpdateModeDefault
 	if !hasBundleForCurrent {
-		fmt.Printf("[Plan] No bundle for version %q — rebase mode\n", currentVersion)
+		if p.debug {
+			fmt.Printf("[Plan] No bundle for version %q — rebase mode\n", currentVersion)
+		}
 		mode = UpdateModeRebase
 	}
 
 	go func() {
 		for err := range p.errors {
-			fmt.Printf("[Planner] Error: %v\n", err)
+			if p.debug {
+				fmt.Printf("[Planner] Error: %v\n", err)
+			}
 		}
 	}()
 
@@ -79,12 +85,9 @@ func (p *Planner) Start(
 
 	close(p.errors)
 
-	fmt.Printf("[Plan] Total: %d  Ignore: %d  Patch: %d  Download: %d\n",
-		p.collector.Total(),
-		p.collector.TotalCategory(FileResultIgnore),
-		p.collector.TotalCategory(FileResultPatch),
-		p.collector.TotalCategory(FileResultDownload),
-	)
+	if p.debug {
+		fmt.Printf("[Plan] Total: %d  Ignore: %d  Patch: %d  Download: %d\n", p.collector.Total(), p.collector.TotalCategory(FileResultIgnore), p.collector.TotalCategory(FileResultPatch), p.collector.TotalCategory(FileResultDownload))
+	}
 
 	return &Plan{
 		Mode:                 mode,

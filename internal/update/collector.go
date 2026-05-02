@@ -49,6 +49,7 @@ type PlanningResultCollector struct {
 	channel chan *FileCategorisationResult
 	done    chan struct{}
 	mu      sync.Mutex
+	debug   bool
 }
 
 func NewPlanningResultCollector() *PlanningResultCollector {
@@ -67,13 +68,19 @@ func (c *PlanningResultCollector) Start() {
 		label := reasonLabel[result.Reason]
 		switch result.Category {
 		case FileResultIgnore:
-			fmt.Printf("[Plan] ok      %s (%s)\n", result.File.Path, label)
+			if c.debug {
+				fmt.Printf("[Plan] ok      %s (%s)\n", result.File.Path, label)
+			}
 			c.FilesIgnored = append(c.FilesIgnored, result.File)
 		case FileResultPatch:
-			fmt.Printf("[Plan] patch   %s (%s)\n", result.File.Path, label)
+			if c.debug {
+				fmt.Printf("[Plan] patch   %s (%s)\n", result.File.Path, label)
+			}
 			c.FilesRequirePatch = append(c.FilesRequirePatch, result.File)
 		case FileResultDownload:
-			fmt.Printf("[Plan] download %s (%s)\n", result.File.Path, label)
+			if c.debug {
+				fmt.Printf("[Plan] download %s (%s)\n", result.File.Path, label)
+			}
 			c.FilesRequireDownload = append(c.FilesRequireDownload, result.File)
 		}
 		c.mu.Unlock()

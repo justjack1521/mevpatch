@@ -3,10 +3,10 @@ package file
 import "time"
 
 type LocalFile struct {
-	Path      string    `json:"ID"`
-	Size      int64     `json:"Path"`
+	Path      string    `json:"Path"`
+	Size      int64     `json:"Size"`
 	Checksum  string    `json:"Checksum"`
-	Timestamp time.Time `json:"Size"`
+	Timestamp time.Time `json:"Timestamp"`
 }
 
 func (f LocalFile) Zero() bool {

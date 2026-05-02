@@ -19,13 +19,14 @@ func PatcherDir() (string, error) {
 //
 // Directory layout:
 //
-//	game_root/            ← launcher files live here (app == "launcher")
-//	game_root/Game/       ← game files live here    (app == "game")
-//	game_root/Patching/   ← patcher exe lives here
+//	game_root/                                  ← launcher files live here
+//	game_root/Game/                             ← game files live here
+//	game_root/Blank Project Launcher_Data/
+//	  Patching/                                 ← patcher.exe and .version files live here
 //
-// So relative to the patcher exe:
+// So relative to patcher.exe:
 //
-//	launcher files → ../../{normal}
+//	launcher files → ../../{normal}             (up from Patching/, up from Launcher_Data/)
 //	game files     → ../../Game/{normal}
 func PersistentPath(app string, normal string) (string, error) {
 	patcher, err := PatcherDir()
@@ -55,7 +56,10 @@ func VersionFilePath(app string) (string, error) {
 	return filepath.Join(patcher, fmt.Sprintf("%s.version", app)), nil
 }
 
-// TemporaryPath returns a path under the OS temp directory for scratch files.
+// LauncherExePath returns the full path to the launcher executable.
+func LauncherExePath() (string, error) {
+	return PersistentPath("launcher", "Blank Project Launcher.exe")
+}
 func TemporaryPath(app string, normal string) string {
 	return filepath.Clean(filepath.Join(os.TempDir(), "mevpatch", app, normal))
 }

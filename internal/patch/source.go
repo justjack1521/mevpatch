@@ -1,22 +1,55 @@
 package patch
 
 import (
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/justjack1521/mevpatch/internal/file"
 )
 
+var httpClient = &http.Client{}
+
+var http1Client = &http.Client{
+	Transport: &http.Transport{
+		TLSNextProto: make(map[string]func(string, *tls.Conn) http.RoundTripper),
+	},
+}
+
+// ForceHTTP1Client forces HTTP/1.1 for all downloads.
+func ForceHTTP1Client() {
+	httpClient = http1Client
+}
+
+func isStreamError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "stream error") ||
+		strings.Contains(s, "INTERNAL_ERROR") ||
+		strings.Contains(s, "CANCEL") ||
+		strings.Contains(s, "PROTOCOL_ERROR")
+}
+
 // RemoteFileSourceJob is a request to download a single source file.
 type RemoteFileSourceJob struct {
-	Path     string
-	Checksum string
-	Size     int64
+	Path          string
+	Checksum      string
+	Size          int64
+	SourceVersion string // version folder to download from e.g. "1.0.0"
+}
+
+// SourceProgress is sent on the progress channel during a source download.
+type SourceProgress struct {
+	BytesRead int
+	FileDone  bool
 }
 
 type RemoteFileSourceWorker struct {
@@ -25,7 +58,7 @@ type RemoteFileSourceWorker struct {
 	host        string
 	sources     <-chan *RemoteFileSourceJob
 	commits     chan<- *FileMetadataCommitJob
-	progress    chan<- float32
+	progress    chan<- SourceProgress
 	errors      chan<- error
 }
 
@@ -34,7 +67,7 @@ func NewRemoteFileSourceWorker(
 	app, host string,
 	input <-chan *RemoteFileSourceJob,
 	commits chan<- *FileMetadataCommitJob,
-	progress chan<- float32,
+	progress chan<- SourceProgress,
 	errors chan<- error,
 ) *RemoteFileSourceWorker {
 	return &RemoteFileSourceWorker{
@@ -46,28 +79,34 @@ func NewRemoteFileSourceWorker(
 func (w *RemoteFileSourceWorker) Run() {
 	defer w.wg.Done()
 	for job := range w.sources {
-		fmt.Printf("[Source] Downloading: %s\n", job.Path)
 		if err := w.run(job); err != nil {
-			fmt.Printf("[Source] Failed: %s: %v\n", job.Path, err)
 			w.errors <- err
-		} else {
-			fmt.Printf("[Source] Done: %s\n", job.Path)
 		}
 	}
 }
 
 func (w *RemoteFileSourceWorker) run(job *RemoteFileSourceJob) error {
+	err := w.attempt(job, httpClient)
+	if err != nil && isStreamError(err) {
+		err = w.attempt(job, http1Client)
+	}
+	return err
+}
+
+func (w *RemoteFileSourceWorker) attempt(job *RemoteFileSourceJob, client *http.Client) error {
 	destination, err := file.PersistentPath(w.application, job.Path)
 	if err != nil {
 		return fmt.Errorf("resolving path for %s: %w", job.Path, err)
 	}
 
-	uri, err := url.JoinPath(w.host, "downloads", w.application, "source", job.Path)
-	if err != nil {
-		return fmt.Errorf("building URL for %s: %w", job.Path, err)
+	u := &url.URL{
+		Scheme: "https",
+		Host:   strings.TrimPrefix(strings.TrimPrefix(w.host, "https://"), "http://"),
+		Path:   "/downloads/" + w.application + "/src/" + job.SourceVersion + "/" + job.Path,
 	}
+	uri := u.String()
 
-	resp, err := http.Get(uri)
+	resp, err := client.Get(uri)
 	if err != nil {
 		return fmt.Errorf("GET %s: %w", uri, err)
 	}
@@ -81,7 +120,6 @@ func (w *RemoteFileSourceWorker) run(job *RemoteFileSourceJob) error {
 		return fmt.Errorf("creating directories for %s: %w", destination, err)
 	}
 
-	// Write to a temp file first so a failed download doesn't leave a corrupt file.
 	tmp := destination + ".tmp"
 	out, err := os.Create(tmp)
 	if err != nil {
@@ -95,7 +133,7 @@ func (w *RemoteFileSourceWorker) run(job *RemoteFileSourceJob) error {
 		if n > 0 {
 			wn, writeErr := out.Write(buf[:n])
 			written += int64(wn)
-			w.progress <- float32(wn)
+			w.progress <- SourceProgress{BytesRead: wn}
 			if writeErr != nil {
 				out.Close()
 				os.Remove(tmp)
@@ -113,7 +151,6 @@ func (w *RemoteFileSourceWorker) run(job *RemoteFileSourceJob) error {
 	}
 	out.Close()
 
-	// Verify checksum before committing.
 	checksum, err := GetChecksumForPath(tmp)
 	if err != nil {
 		os.Remove(tmp)
@@ -129,6 +166,7 @@ func (w *RemoteFileSourceWorker) run(job *RemoteFileSourceJob) error {
 		return fmt.Errorf("committing download for %s: %w", job.Path, err)
 	}
 
+	w.progress <- SourceProgress{FileDone: true}
 	w.commits <- &FileMetadataCommitJob{Path: job.Path, Size: written, Checksum: checksum}
 	return nil
 }
@@ -151,7 +189,7 @@ func NewRemoteFileSourceWorkerGroup(count int) *RemoteFileSourceWorkerGroup {
 func (g *RemoteFileSourceWorkerGroup) Start(
 	app, host string,
 	commits chan<- *FileMetadataCommitJob,
-	progress chan<- float32,
+	progress chan<- SourceProgress,
 	errors chan<- error,
 ) {
 	g.wg.Add(g.count)

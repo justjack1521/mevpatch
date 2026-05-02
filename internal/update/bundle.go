@@ -17,7 +17,8 @@ import (
 
 // BundleDownloader downloads and extracts the patch bundle for the current version.
 type BundleDownloader struct {
-	app string
+	app   string
+	debug bool
 	// remotes maps file UUID → manifest file, for all files that need patching.
 	remotes map[uuid.UUID]*mevmanifest.File
 }
@@ -100,19 +101,25 @@ func (d *BundleDownloader) Unzip(currentVersion patch.Version, targetVersion pat
 	var results []*patch.RemoteFileMergeJob
 
 	for _, entry := range reader.File {
-		fmt.Printf("[Bundle] Extracting %s\n", entry.Name)
+		if d.debug {
+			fmt.Printf("[Bundle] Extracting %s\n", entry.Name)
+		}
 
 		// Entry names are "{uuid}.jdf" — strip suffix to get UUID.
 		name := strings.TrimSuffix(entry.Name, filepath.Ext(entry.Name))
 		id, err := uuid.FromString(name)
 		if err != nil {
-			fmt.Printf("[Bundle] Skipping unrecognised entry: %s\n", entry.Name)
+			if d.debug {
+				fmt.Printf("[Bundle] Skipping unrecognised entry: %s\n", entry.Name)
+			}
 			continue
 		}
 
 		remote, exists := d.remotes[id]
 		if !exists {
-			fmt.Printf("[Bundle] Skipping entry not in plan: %s\n", entry.Name)
+			if d.debug {
+				fmt.Printf("[Bundle] Skipping entry not in plan: %s\n", entry.Name)
+			}
 			continue
 		}
 
@@ -123,7 +130,9 @@ func (d *BundleDownloader) Unzip(currentVersion patch.Version, targetVersion pat
 
 		results = append(results, job)
 		done <- true
-		fmt.Printf("[Bundle] Extracted %s → %s\n", entry.Name, remote.Path)
+		if d.debug {
+			fmt.Printf("[Bundle] Extracted %s → %s\n", entry.Name, remote.Path)
+		}
 	}
 
 	return results, nil
